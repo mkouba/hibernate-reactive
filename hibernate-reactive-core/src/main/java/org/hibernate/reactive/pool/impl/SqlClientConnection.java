@@ -7,6 +7,8 @@ package org.hibernate.reactive.pool.impl;
 
 import java.lang.invoke.MethodHandles;
 import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.SQLIntegrityConstraintViolationException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -16,6 +18,8 @@ import org.hibernate.engine.jdbc.internal.FormatStyle;
 import org.hibernate.engine.jdbc.spi.SqlStatementLogger;
 import org.hibernate.reactive.adaptor.impl.JdbcNull;
 import org.hibernate.reactive.adaptor.impl.ResultSetAdaptor;
+import org.hibernate.reactive.exception.ConstraintViolationException;
+import org.hibernate.reactive.exception.VertxSqlClientException;
 import org.hibernate.reactive.logging.impl.Log;
 import org.hibernate.reactive.logging.impl.LoggerFactory;
 import org.hibernate.reactive.pool.BatchingConnection;
@@ -75,8 +79,7 @@ public class SqlClientConnection implements ReactiveConnection {
 	}
 
 	@Override
-	public CompletionStage<Void> update(String sql, Object[] paramValues,
-										boolean allowBatching, Expectation expectation) {
+	public CompletionStage<Void> update(String sql, Object[] paramValues, boolean allowBatching, Expectation expectation) {
 		return update( sql, paramValues )
 				.thenAccept( rowCount -> expectation.verifyOutcome( rowCount,-1, sql ) );
 	}
@@ -91,6 +94,7 @@ public class SqlClientConnection implements ReactiveConnection {
 	public CompletionStage<Long> selectIdentifier(String sql, Object[] paramValues) {
 		translateNulls( paramValues );
 		return preparedQuery( sql, Tuple.wrap( paramValues ) )
+				.handle( (rows, throwable) -> convertException( rows, sql, throwable ) )
 				.thenApply( rowSet -> {
 					for (Row row: rowSet) {
 						return row.getLong(0);
@@ -101,36 +105,52 @@ public class SqlClientConnection implements ReactiveConnection {
 
 	@Override
 	public CompletionStage<Result> select(String sql) {
-		return preparedQuery( sql ).thenApply(RowSetResult::new);
+		return preparedQuery( sql )
+				.thenApply(RowSetResult::new);
 	}
 
 	@Override
 	public CompletionStage<Result> select(String sql, Object[] paramValues) {
 		translateNulls( paramValues );
-		return preparedQuery( sql, Tuple.wrap( paramValues ) ).thenApply(RowSetResult::new);
+		return preparedQuery( sql, Tuple.wrap( paramValues ) )
+				.thenApply(RowSetResult::new);
 	}
 
 	@Override
 	public CompletionStage<ResultSet> selectJdbc(String sql, Object[] paramValues) {
 		translateNulls( paramValues );
-		return preparedQuery( sql, Tuple.wrap( paramValues ) ).thenApply(ResultSetAdaptor::new);
+		return preparedQuery( sql, Tuple.wrap( paramValues ) )
+				.thenApply(ResultSetAdaptor::new);
 	}
 
 	@Override
 	public CompletionStage<ResultSet> selectJdbcOutsideTransaction(String sql, Object[] paramValues) {
-		return preparedQueryOutsideTransaction( sql, Tuple.wrap( paramValues ) ).thenApply(ResultSetAdaptor::new);
+		return preparedQueryOutsideTransaction( sql, Tuple.wrap( paramValues ) )
+				.thenApply(ResultSetAdaptor::new);
 	}
 
 	@Override
 	public CompletionStage<Void> execute(String sql) {
-		return preparedQuery( sql ).thenApply( ignore -> null );
+		return preparedQuery( sql )
+				.thenApply( ignore -> null );
 	}
 
 	@Override
 	public CompletionStage<Void> executeUnprepared(String sql) {
 		feedback( sql );
 		return client().query( sql ).execute().toCompletionStage()
+				.handle( (rows, throwable) -> convertException( rows, sql, throwable ) )
 				.thenCompose( CompletionStages::voidFuture );
+	}
+
+	private static RowSet<Row> convertException(RowSet<Row> rows, String sql, Throwable sqlException) {
+		if ( SQLIntegrityConstraintViolationException.class.isInstance( sqlException ) ) {
+			throw new ConstraintViolationException( "could not execute statement", (SQLException) sqlException, sql );
+		}
+		if ( SQLException.class.isInstance( sqlException ) ) {
+			throw new VertxSqlClientException( "could not execute statement", (SQLException) sqlException, sql );
+		}
+		return rows;
 	}
 
 	@Override
@@ -190,27 +210,32 @@ public class SqlClientConnection implements ReactiveConnection {
 
 	public CompletionStage<RowSet<Row>> preparedQuery(String sql, Tuple parameters) {
 		feedback( sql );
-		return client().preparedQuery( sql ).execute( parameters ).toCompletionStage();
+		return client().preparedQuery( sql ).execute( parameters ).toCompletionStage()
+				.handle( (rows, throwable) -> convertException( rows, sql, throwable ) );
 	}
 
 	public CompletionStage<RowSet<Row>> preparedQueryBatch(String sql, List<Tuple> parameters) {
 		feedback( sql );
-		return client().preparedQuery( sql ).executeBatch( parameters ).toCompletionStage();
+		return client().preparedQuery( sql ).executeBatch( parameters ).toCompletionStage()
+				.handle( (rows, throwable) -> convertException( rows, sql, throwable ) );
 	}
 
 	public CompletionStage<RowSet<Row>> preparedQuery(String sql) {
 		feedback( sql );
-		return client().preparedQuery( sql ).execute().toCompletionStage();
+		return client().preparedQuery( sql ).execute().toCompletionStage()
+				.handle( (rows, throwable) -> convertException( rows, sql, throwable ) );
 	}
 
 	public CompletionStage<RowSet<Row>> preparedQueryOutsideTransaction(String sql) {
 		feedback( sql );
-		return pool.preparedQuery( sql ).execute().toCompletionStage();
+		return pool.preparedQuery( sql ).execute().toCompletionStage()
+				.handle( (rows, throwable) -> convertException( rows, sql, throwable ) );
 	}
 
 	public CompletionStage<RowSet<Row>> preparedQueryOutsideTransaction(String sql, Tuple parameters) {
 		feedback( sql );
-		return pool.preparedQuery( sql ).execute( parameters ).toCompletionStage();
+		return pool.preparedQuery( sql ).execute( parameters ).toCompletionStage()
+				.handle( (rows, throwable) -> convertException( rows, sql, throwable ) );
 	}
 
 	private void feedback(String sql) {
