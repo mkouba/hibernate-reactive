@@ -37,7 +37,7 @@ import org.testcontainers.containers.OracleContainer;
  */
 class OracleDatabase implements TestableDatabase {
 
-	public static final String IMAGE_NAME = "gvenzl/oracle-xe:18-slim";
+	public static final String IMAGE_NAME = "gvenzl/oracle-xe:21.3.0-slim";
 
 	public static final OracleDatabase INSTANCE = new OracleDatabase();
 
